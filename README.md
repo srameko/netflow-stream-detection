@@ -3,15 +3,19 @@
 Spot **streaming**, **remote-access** and **IP-camera** traffic in NetFlow data.
 
 `flowspot` is a single-file, dependency-free Python rewrite of the scripts that accompanied my
-thesis (`streaming.pl`, `other.pl`, `ipcam.pl`, 2013). It drives [`nfdump`](https://github.com/phaag/nfdump)
+[master's thesis](https://is.muni.cz/th/jg1tm/) (`streaming.pl`, `other.pl`, `ipcam.pl`, 2013). It drives [`nfdump`](https://github.com/phaag/nfdump)
 in read-only mode, applies behavioural signatures (packet counts, packets/s, bytes/packet, TCP flags, …)
 to the flow records, and reports the matching flows.
 
 ```console
-$ flowspot streaming flows.nfcapd
-ulozto.cz/live - 2 flow(s)
-  2013-05-16 10:00:00.000  TCP   93.99.92.7:80 -> 10.0.0.2:50000  flags=...AP... packets=5000 bytes=7000000
-...
+$ flowspot flows.nfcapd          # no command: try everything and rank the guesses
+Best guess of what is in it. Scores are heuristic confidence (signature specificity x amount of
+evidence), not calibrated probabilities - treat them as a ranking.
+
+  POSSIBLE  54%  [streaming] ulozto.cz/live - 3 flow(s), 3 source(s), 22.5 MB
+                 e.g. 2023-11-14 22:56:40.000  TCP   93.99.92.1:80 -> 10.0.0.2:50001  flags=...AP... packets=5000 bytes=7500000
+  POSSIBLE  36%  [remote] TeamViewer - 2 flow(s), 1 source(s), 644 B
+  WEAK      23%  [remote] VNC - 1 flow(s), 1 source(s), 400.0 kB
 ```
 
 ## Requirements
