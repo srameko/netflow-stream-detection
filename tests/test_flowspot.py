@@ -26,6 +26,9 @@ for rule in spec:
         if rule.get("err"):
             sys.stderr.write(rule["err"])
         sys.stdout.write(rule.get("out", ""))
+        if rule.get("sleep_after"):
+            sys.stdout.flush()
+            time.sleep(rule["sleep_after"])
         sys.exit(rule.get("code", 0))
 """
 
@@ -75,7 +78,7 @@ class Harness(unittest.TestCase):
 
 class FilterTests(unittest.TestCase):
     def test_youtube_covers_all_google_nets_and_variants(self):
-        rules = {r.variant: r for r in flowspot.streaming_rules([], [], [], False) if r.service == "youtube.com"}
+        rules = {r.variant: r for r in flowspot.streaming_rules({}, False) if r.service == "youtube.com"}
         self.assertEqual(set(rules), {"live", "html5", "https", "http"})
         for rule in rules.values():
             for net in flowspot.GOOGLE_NETS:
@@ -83,7 +86,7 @@ class FilterTests(unittest.TestCase):
             self.assertEqual(rule.filter.count("("), rule.filter.count(")"))
 
     def test_seznam_branches_are_exclusive(self):
-        names = lambda d: {r.service for r in flowspot.streaming_rules([], [], d, False)}  # noqa: E731
+        names = lambda d: {r.service for r in flowspot.streaming_rules({"szn_seen": d}, False)}  # noqa: E731
         self.assertIn("seznam.cz", names([]))
         self.assertNotIn("mixer.cz", names([]))
         self.assertIn("mixer.cz", names(["1.2.3.4"]))
@@ -91,8 +94,8 @@ class FilterTests(unittest.TestCase):
         self.assertNotIn("seznam.cz", names(["1.2.3.4"]))
 
     def test_generic_only_on_request(self):
-        self.assertFalse(any("generic" in r.service for r in flowspot.streaming_rules([], [], [], False)))
-        self.assertTrue(any("generic" in r.service for r in flowspot.streaming_rules([], [], [], True)))
+        self.assertFalse(any("generic" in r.service for r in flowspot.streaming_rules({}, False)))
+        self.assertTrue(any("generic" in r.service for r in flowspot.streaming_rules({}, True)))
 
     def test_skype_filter_groups_local_nets(self):
         # The original relied on OR/AND precedence; make sure the OR group is parenthesised.
@@ -212,7 +215,10 @@ class CliTests(Harness):
             "10.0.0.7,10.0.0.9,445,40002,1000,3000000\n",
             "10.0.0.8,10.0.0.9,5353,5353,2,200\n",
         ])
-        self.set_rules([{"match": "src net 10.0.0.0/8 AND dst net", "out": rows}])
+        self.set_rules([
+            {"match": " AND (port ", "out": "10.0.0.50\n"},  # pass 2: who sends on the camera ports
+            {"match": "src net 10.0.0.0/8 AND dst net", "out": rows},
+        ])
         code, out, _ = self.run_cli("ipcam", str(self.capture), "--nfdump", str(self.fake),
                                     "--net", "10.0.0.0/8", "--json")
         data = json.loads(out)
@@ -264,6 +270,14 @@ class RunnerTests(Harness):
 
     def test_validate_capture_accepts_directory_with_files(self):
         self.assertEqual(flowspot.validate_capture(str(self.dir)), self.dir.resolve())
+
+    def test_directory_with_colon_is_rejected_with_a_clear_message(self):
+        d = self.dir / "day:10:00"
+        d.mkdir()
+        (d / "nfcapd.1").write_bytes(b"")
+        with self.assertRaises(flowspot.FlowspotError) as ctx:
+            flowspot.validate_capture(str(d))
+        self.assertIn("file-range separator", str(ctx.exception))
 
     def test_validate_capture_rejects_empty_directory(self):
         empty = self.dir / "empty"
@@ -515,7 +529,7 @@ class AutoCliTests(Harness):
 class RenderingAndEdgeTests(Harness):
     def test_ipcam_text_report(self):
         rows = "10.0.0.50,10.0.0.9,554,40000,1000,1000000\nbad,row\n10.0.0.1,10.0.0.2,x,1,1,1\n10.0.0.1,10.0.0.2,1,1,a,b\n"
-        self.set_rules([{"match": "src net", "out": rows}])
+        self.set_rules([{"match": " AND (port ", "out": "10.0.0.50\n"}, {"match": "src net", "out": rows}])
         code, out, _ = self.run_cli("ipcam", str(self.capture), "--nfdump", str(self.fake), "--net", "10.0.0.0/8")
         self.assertEqual(code, flowspot.EXIT_FOUND)
         for needle in ("IP-camera analysis of 10.0.0.0/8", "LIKELY IP CAMERAS", "10.0.0.50", "port 554"):
@@ -607,7 +621,9 @@ class RenderingAndEdgeTests(Harness):
         self.assertIsNone(flowspot.parse_port("abc"))
         self.assertIsNone(flowspot.parse_port("70000"))
         self.assertIsNone(flowspot.parse_ip("999.1.1.1"))
-        self.assertEqual(flowspot._endpoints([["only-one-column"]], 0, 1), set())
+        self.assertIsNone(flowspot._endpoint(["only-one-column"], 0, 1))
+        self.assertEqual(flowspot._endpoint(["1.2.3.4", "99"], 0, 1), ("1.2.3.4", 99))
+        self.assertIsNone(flowspot._endpoint(["1.2.3.4", "99"], 0, 1, min_port=1000))
 
     def test_human_bytes_large(self):
         self.assertEqual(flowspot.human_bytes(5 * 10**12), "5.0 TB")
@@ -789,6 +805,84 @@ class DnsCacheTests(Harness):
     def test_no_temp_files_left_behind(self):
         flowspot.save_dns_cache(self.dir / "c.json", self.HOSTS, "t")
         self.assertEqual([p.name for p in self.dir.glob("c.json.*")], [])
+
+
+class StreamingRunnerTests(Harness):
+    def test_rows_arrive_before_nfdump_finishes_and_close_kills_it(self):
+        import time
+        self.set_rules([{"match": "", "out": "1.2.3.4,80\n", "sleep_after": 20}])
+        nf = flowspot.NfDump(str(self.fake), self.capture, timeout=60)
+        start = time.monotonic()
+        gen = nf.stream("port 80", "%sa,%sp")
+        self.assertEqual(next(gen), ["1.2.3.4", "80"])   # delivered while nfdump is still running
+        gen.close()                                       # consumer stops early -> process is killed
+        self.assertLess(time.monotonic() - start, 10)
+
+    def test_large_output_is_streamed_not_buffered(self):
+        rows = "".join(f"10.0.{i // 250}.{i % 250 + 1},80\n" for i in range(20000))
+        self.set_rules([{"match": "", "out": rows}])
+        nf = flowspot.NfDump(str(self.fake), self.capture)
+        count = sum(1 for _ in nf.stream("port 80", "%sa,%sp"))
+        self.assertEqual(count, 20000)
+
+    def test_heavy_stderr_does_not_deadlock(self):
+        self.set_rules([{"match": "", "out": "1.1.1.1,1\n", "err": "x" * 500_000}])
+        nf = flowspot.NfDump(str(self.fake), self.capture)
+        self.assertEqual(nf.query("port 1", "%sa,%sp"), [["1.1.1.1", "1"]])
+
+    def test_error_surfaces_after_rows(self):
+        self.set_rules([{"match": "", "out": "1.1.1.1,1\n", "err": "oops", "code": 2}])
+        nf = flowspot.NfDump(str(self.fake), self.capture)
+        with self.assertRaises(flowspot.FlowspotError):
+            list(nf.stream("port 1", "%sa,%sp"))
+
+
+class TieBreakTests(unittest.TestCase):
+    def test_ports_tie_break_numerically(self):
+        from collections import Counter
+        bytes_, pkts = Counter({1000: 5, 554: 5}), Counter({1000: 1, 554: 1})
+        self.assertEqual(flowspot._top(bytes_, pkts, 1), ({554}, {554}))
+
+    def test_addresses_tie_break_numerically(self):
+        from collections import Counter
+        bytes_ = Counter({"10.0.0.10": 5, "10.0.0.9": 5})
+        pkts = Counter({"10.0.0.10": 1, "10.0.0.9": 1})
+        self.assertEqual(flowspot._top(bytes_, pkts, 1), ({"10.0.0.9"}, {"10.0.0.9"}))
+
+
+class RuleDataTests(unittest.TestCase):
+    def test_build_expands_host_sets(self):
+        spec = flowspot.RuleSpec("x", "", (flowspot.Each("h", "src ip {ip}"), "net 1.2.3.0/24"))
+        self.assertEqual(spec.build({"h": ["1.1.1.1", "2.2.2.2"]}),
+                         "(src ip 1.1.1.1) OR (src ip 2.2.2.2) OR (net 1.2.3.0/24)")
+        self.assertEqual(spec.build({}), "net 1.2.3.0/24")           # single term: not wrapped
+        self.assertEqual(flowspot.RuleSpec("y", "", (flowspot.Each("h", "src ip {ip}"),)).build({}), "")
+
+    def test_describe_uses_placeholders(self):
+        spec = flowspot.RuleSpec("x", "", (flowspot.Each("grooveshark", "src ip {ip}"),))
+        self.assertEqual(spec.describe(), "src ip <grooveshark addresses>")
+
+    def test_spec_tables_are_consistent(self):
+        specs = flowspot.STREAMING_SPECS + flowspot.REMOTE_SPECS
+        keys = [(s.service, s.variant) for s in specs]
+        self.assertEqual(len(keys), len(set(keys)), "duplicate rule")
+        for s in specs:
+            self.assertTrue(0 < s.specificity <= 1, s.title)
+            self.assertIn(s.when, flowspot.CONDITIONS)
+            self.assertIn(s.category, ("streaming", "remote"))
+        for key in keys + list(flowspot.STAGED_SPECIFICITY):
+            self.assertIn(key, flowspot.SPECIFICITY)
+
+    def test_empty_expansions_are_dropped(self):
+        for rule in flowspot.streaming_rules({}, True):
+            self.assertTrue(rule.filter.strip(), rule.service)
+
+    def test_signatures_lists_specificity_and_conditions(self):
+        text = flowspot.render_signatures()
+        self.assertIn("specificity 0.45", text)
+        self.assertIn("[only if a Seznam CDN dispatcher is seen in the capture]", text)
+        self.assertIn("src ip <grooveshark addresses>", text)
+        self.assertEqual(text.count("[youtube.com ("), 4)
 
 
 if __name__ == "__main__":

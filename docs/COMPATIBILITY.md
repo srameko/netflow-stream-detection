@@ -12,16 +12,21 @@
 
 ## What was actually verified
 
-Verified by running the full test suite (107 tests: unit + end-to-end against a real `nfdump`, ~99 % line coverage):
+Verified by running the full test suite (119 tests: unit + end-to-end against a real `nfdump`, ~99 % line coverage):
 
 | Python | nfdump | OS | Result |
 |---|---|---|---|
 | 3.9.25 | 1.7.10 | macOS 26 (arm64) | ✅ pass |
 | 3.11, 3.12, 3.14, 3.15 | 1.7.10 | macOS 26 (arm64) | ✅ pass |
 
-Configured in CI but **not yet run** (the repository has not been pushed): Python 3.9 / 3.11 / 3.13 on
-Ubuntu (`ubuntu-latest`) with the distribution's `nfdump` package. Until the first green CI run, treat Linux and
-the Ubuntu nfdump version as *expected*, not *verified*.
+Verified by CI (GitHub Actions, real `nfdump` from the Ubuntu package, 119 tests per job):
+
+| Python | OS | Result |
+|---|---|---|
+| 3.9, 3.11, 3.13 | Ubuntu 24.04 | ✅ pass |
+| 3.13 | `ubuntu-latest` (currently Ubuntu 26.04) | ✅ pass |
+
+The matrix is pinned to Ubuntu 24.04 because Python 3.9 is not provided for newer runner images.
 
 ## Python
 

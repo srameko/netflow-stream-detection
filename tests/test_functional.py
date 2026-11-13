@@ -36,14 +36,12 @@ class Functional(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def run_tool(self, *args, capture=None):
-        proc = subprocess.run(
-            [sys.executable, "-I", str(ROOT / "flowspot.py"), *args, str(capture or self.capture)]
-            if args and args[0] in ("streaming", "remote", "ipcam", "auto")
-            else [sys.executable, "-I", str(ROOT / "flowspot.py"), str(capture or self.capture), *args],
+    def run_auto(self, *options):
+        """flowspot FILE [options]   (no command: auto mode)"""
+        return subprocess.run(
+            [sys.executable, "-I", str(ROOT / "flowspot.py"), str(self.capture), *options],
             capture_output=True, text=True, timeout=300,
         )
-        return proc
 
     def run_cmd(self, command, *options, capture=None):
         """flowspot COMMAND FILE [options]"""
@@ -56,8 +54,9 @@ class Functional(unittest.TestCase):
 
     def test_all_signatures_are_accepted_by_nfdump(self):
         nf = flowspot.NfDump(flowspot.find_nfdump(None), self.capture)
-        filters = [r.filter for r in flowspot.streaming_rules(["8.8.8.8"], ["81.0.206.1"], ["77.75.73.242"], True)]
-        filters += [r.filter for r in flowspot.streaming_rules([], [], [], True)]
+        hosts = {"grooveshark": ["8.8.8.8"], "nacevi": ["81.0.206.1"], "szn_seen": ["77.75.73.242"]}
+        filters = [r.filter for r in flowspot.streaming_rules(hosts, True)]   # Seznam dispatcher seen
+        filters += [r.filter for r in flowspot.streaming_rules({}, True)]     # not seen (live heuristic)
         filters += [
             flowspot.SSH_X_FILTER, flowspot.VNC_FILTER, flowspot.TEAMVIEWER_TCP_FILTER,
             flowspot.TEAMVIEWER_UDP_FILTER.format(p=41000), flowspot.SKYPE_FILTER,
@@ -123,7 +122,7 @@ class Functional(unittest.TestCase):
     # -- auto mode (no command) ------------------------------------------------------------
 
     def test_auto_default_ranks_findings(self):
-        p = self.run_tool("--no-dns", "--net", "192.168.0.0/16")  # flowspot FILE --no-dns ...
+        p = self.run_auto("--no-dns", "--net", "192.168.0.0/16")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn(PREFIX_SERVICE, p.stdout)
         self.assertIn("TeamViewer", p.stdout)
@@ -132,7 +131,7 @@ class Functional(unittest.TestCase):
         self.assertLess(p.stdout.index(PREFIX_SERVICE), p.stdout.index("ssh -X"))  # ranked
 
     def test_auto_json(self):
-        p = self.run_tool("--no-dns", "--json")
+        p = self.run_auto("--no-dns", "--json")
         data = json.loads(p.stdout)
         verdict = data["extra"]["verdict"]
         self.assertTrue(verdict)
@@ -198,7 +197,7 @@ class Functional(unittest.TestCase):
 
     def test_capture_is_not_modified(self):
         before = self.capture.read_bytes()
-        self.run_tool("--no-dns")
+        self.run_auto("--no-dns")
         self.assertEqual(self.capture.read_bytes(), before)
 
     def test_signatures_command_needs_no_nfdump(self):

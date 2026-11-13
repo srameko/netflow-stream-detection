@@ -43,9 +43,12 @@ Nothing leaves the loopback interface.
 
 ## Adding or changing a signature
 
-1. Streaming service: add an `add("service", "variant", "<nfdump filter>")` line in `streaming_rules()`
-   (constants for networks/hosts live above it). Remote: `run_remote()`. Camera heuristic: `run_ipcam()`.
-2. If the rule is weaker or stronger than the default, add it to `SPECIFICITY` (auto-mode score, 0..1).
+1. Streaming/remote rule: add a `RuleSpec(service, variant, terms, specificity, when)` to `STREAMING_SPECS` or
+   `REMOTE_SPECS` (network/host constants live above them). `terms` are OR-ed nfdump filter terms; an `Each(set, template)`
+   expands to one term per address of a run-time host set. Multi-stage detectors (TeamViewer, Skype) are functions
+   (`_teamviewer`, `_skype`); the camera heuristic is `run_ipcam()`.
+2. `specificity` (0..1) feeds the auto-mode score: strong = one service's own prefix plus behaviour limits, weak =
+   shared prefix / port / traffic shape only.
 3. Add a scenario to `tests/make_capture.py` and an assertion to `tests/test_functional.py`; the
    "all signatures are accepted by nfdump" test picks the new filter up automatically.
 4. Describe it in `docs/DETECTION.md`.

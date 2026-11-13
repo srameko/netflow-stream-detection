@@ -67,13 +67,13 @@ IP cameras push a continuous stream of mid-size packets to a recorder/viewer in 
 
 ## Adding or changing a signature
 
-All signatures live in `flowspot.py` as constants and in `streaming_rules()` / `run_remote()`. A rule is
-just an nfdump filter string, so a new streaming service is a one-line `add(...)` call plus a test in
-`tests/test_flowspot.py` that checks the filter is produced.
+All signatures live in `flowspot.py` as data: `STREAMING_SPECS` and `REMOTE_SPECS` are tuples of `RuleSpec`
+(service, variant, filter terms, specificity, when it applies). A new streaming service is one `RuleSpec` entry plus
+a scenario in `tests/make_capture.py`; `flowspot signatures` prints the table.
 
 ## Auto mode scoring
 
-`flowspot FILE` multiplies a per-signature *specificity* (0..1, table `SPECIFICITY` in `flowspot.py`) by a
+`flowspot FILE` multiplies a per-signature *specificity* (0..1, the `specificity` of each `RuleSpec` in `flowspot.py`) by a
 saturating *evidence* term `1 - exp(-flows/3)` (cameras: `1 - exp(-hosts/2)`), merges variants of one service
 (e.g. the four YouTube profiles), and sorts. Shared-prefix pairs get a 0.85 factor. ≥ 0.6 is *likely*,
 ≥ 0.3 *possible*. The weights are judgement calls, not fitted to data – adjust them to your network.

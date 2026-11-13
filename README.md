@@ -83,7 +83,7 @@ Each guess gets a **score 0–100 %** = *signature specificity* × *amount of ev
 * services that share a network range (abradio/zkouknito, Voyo/nacevi) are marked ambiguous and slightly penalised.
 
 Labels: **likely** ≥ 60 %, **possible** ≥ 30 %, **weak** below. **These are heuristic scores, not calibrated
-probabilities** – they rank, they don't prove. The numbers live in `SPECIFICITY` in `flowspot.py`; change
+probabilities** – they rank, they don't prove. The numbers live in the `RuleSpec` entries in `flowspot.py` (`specificity=`); change
 them if your data says otherwise. `--json` gives the full `verdict` list under `extra`.
 
 ### Examples
@@ -170,8 +170,8 @@ Report vulnerabilities privately – see [SECURITY.md](SECURITY.md).
   `nfcapd` from synthetic NetFlow v5 (and check that *every* shipped filter is valid nfdump syntax); CI runs them
   with the distribution's nfdump. The signatures were written for nfdump 1.6; older releases may differ – open an issue.
 * **Scores are not probabilities** (see *Auto mode*).
-* `--limit` bounds the *listed* flows only; the `ipcam` statistics and the TeamViewer/Skype stages still read all
-  matching records into memory, so analyse very large captures in time slices.
+* Memory stays flat on big captures: nfdump output is streamed and only counters/sets are kept (`--limit` bounds
+  the *listed* flows). Run time still grows with capture size, so slice very large captures by time.
 * **Small captures give noisy `ipcam` results**: with few hosts, every host is "top-N", so chatty services on
   low ports can look like cameras.
 * IPv4-oriented: DNS resolution is IPv4 only; the signatures are IPv4 prefixes.

@@ -42,7 +42,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 __version__ = "1.0.0"
 PROG = "flowspot"
@@ -221,6 +221,11 @@ def validate_capture(text: str) -> Path:
     """Accept a flow file or a directory of flow files (nfdump -R, recursive)."""
     path = Path(text).expanduser()
     if path.is_dir():
+        if ":" in str(path.resolve()):
+            raise FlowspotError(
+                f"directory path contains ':' which nfdump -R reads as a file-range separator: {text} "
+                "(rename the directory or pass the files one by one)"
+            )
         if not os.access(path, os.R_OK | os.X_OK):
             raise FlowspotError(f"capture directory is not readable: {text}")
         if not any(p.is_file() for p in path.rglob("*")):
@@ -259,11 +264,14 @@ class NfDump:
             env["TZ"] = os.environ["TZ"]
         return env
 
-    def query(self, flt: str, fmt: str, max_records: int = 0) -> List[List[str]]:
-        """Run one filter and return the output rows split on commas.
+    def stream(self, flt: str, fmt: str, max_records: int = 0) -> Iterator[List[str]]:
+        """Run one filter and yield the output rows (split on commas) as nfdump produces them.
 
-        Records are listed as exported (no -B bidirectional merging, which
-        would reorder source/destination and hide which side matched).
+        Rows are not collected, so memory stays flat however many records match. Closing the
+        generator early kills nfdump. Errors surface when the iteration ends.
+
+        Records are listed as exported (no -B bidirectional merging, which would reorder
+        source/destination and hide which side matched).
         """
         if not flt.strip():
             raise FlowspotError("internal error: refusing to run nfdump with an empty filter")
@@ -275,44 +283,61 @@ class NfDump:
         source = ["-R", str(self.capture)] if self.capture.is_dir() else ["-r", str(self.capture)]
         cmd = [self.binary, *source, "-q", "-N"]
         if max_records:
-            cmd += ["-c", str(max_records)]  # bound memory: nfdump stops after N records
+            cmd += ["-c", str(max_records)]  # nfdump stops after N records
         cmd += ["-o", f"fmt:{fmt}", flt]
         self.log(f"filter: {flt}")
+        err = tempfile.TemporaryFile()  # a file, not a pipe: cannot fill up and deadlock
         try:
-            proc = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=self.timeout,
-                env=self._env(),
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            raise FlowspotError(f"nfdump did not finish within {self.timeout}s (see --timeout)") from None
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err, env=self._env())
         except OSError as exc:  # includes E2BIG
+            err.close()
             raise FlowspotError(f"cannot run nfdump: {exc}") from None
+        timed_out = threading.Event()
+
+        def kill() -> None:
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(self.timeout, kill)
+        timer.daemon = True
+        timer.start()
+        produced = False
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.decode("utf-8", "replace").strip()
+                if line and line.lower() != "no matching flows":  # printed on stdout even with -q
+                    produced = True
+                    yield [cell.strip() for cell in line.split(",")]
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+            if proc.stdout:
+                proc.stdout.close()
+            proc.wait()
+            err.seek(0)
+            stderr = err.read(65536).decode("utf-8", "replace")
+            err.close()
+        if timed_out.is_set() and proc.returncode != 0:
+            raise FlowspotError(f"nfdump did not finish within {self.timeout}s (see --timeout)")
+        lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
         if proc.returncode != 0:
-            err = proc.stderr.decode("utf-8", "replace").strip().splitlines()
-            raise FlowspotError(f"nfdump failed (exit {proc.returncode}): {printable(err[0]) if err else 'no message'}")
-        rows = []
-        for line in proc.stdout.decode("utf-8", "replace").splitlines():
-            line = line.strip()
-            if line and line.lower() != "no matching flows":  # printed on stdout even with -q
-                rows.append([cell.strip() for cell in line.split(",")])
-        if not rows:
+            raise FlowspotError(f"nfdump failed (exit {proc.returncode}): {printable(lines[0]) if lines else 'no message'}")
+        if not produced:
             # nfdump exits 0 even for a corrupt/truncated file ("bad magic", "read() error");
             # an empty result plus diagnostics must not be mistaken for "nothing found".
-            problems = [
-                ln.strip() for ln in proc.stderr.decode("utf-8", "replace").splitlines()
-                if ln.strip() and "no matching flows" not in ln.lower()
-            ]
+            problems = [ln for ln in lines if "no matching flows" not in ln.lower()]
             if problems:
                 raise FlowspotError(f"nfdump could not read the capture: {printable(problems[0])}")
-        return rows
+
+    def query(self, flt: str, fmt: str, max_records: int = 0) -> List[List[str]]:
+        """Like stream(), collected into a list - only for results that are known to be small."""
+        return list(self.stream(flt, fmt, max_records))
 
     def detect(self, service: str, variant: str, flt: str, category: str = "") -> "Detection":
         """Run a filter and wrap the flows (at most ``limit``) in a Detection."""
-        rows = self.query(flt, FLOW_FMT, max_records=self.limit + 1 if self.limit else 0)
+        rows = self.stream(flt, FLOW_FMT, max_records=self.limit + 1 if self.limit else 0)
         flows = [f for f in (parse_flow(r) for r in rows) if f]
         flows.sort(key=lambda f: f.start)
         truncated = bool(self.limit) and len(flows) > self.limit
@@ -487,75 +512,113 @@ YOUTUBE_VARIANTS: Dict[str, List[str]] = {
 
 GENERIC_FILTER = "packets > 1000 AND pps > 5 AND pps < 800 AND bpp > 1200"
 
+# How specific a signature is, 0..1.  A rule tied to one service's own network range plus behaviour
+# limits is strong; one that matches on a shared prefix, a well-known port or pure traffic shape is
+# weak.  These are judgement calls made by the author, NOT statistically calibrated probabilities.
+SPECIFICITY_DEFAULT = 0.85
 
-def _youtube_filter(variant: str) -> str:
+
+@dataclass(frozen=True)
+class Each:
+    """One filter term per address of the host set ``hosts`` (known only at run time)."""
+
+    hosts: str      # name of the host set: "grooveshark", "nacevi", "szn_seen"
+    template: str   # '{ip}' is replaced by each address
+
+
+Term = Union[str, Each]
+
+# When a rule applies.
+ALWAYS, SZN_SEEN, SZN_UNSEEN, GENERIC = "always", "szn_seen", "szn_unseen", "generic"
+CONDITIONS = {
+    ALWAYS: "",
+    SZN_SEEN: "  [only if a Seznam CDN dispatcher is seen in the capture]",
+    SZN_UNSEEN: "  [only if no Seznam CDN dispatcher is seen in the capture]",
+    GENERIC: "  [only with --generic]",
+}
+
+
+@dataclass(frozen=True)
+class RuleSpec:
+    """A detection rule as data: name, filter terms, applicability and how specific it is."""
+
+    service: str
+    variant: str
+    terms: Tuple[Term, ...]          # OR-ed together; an Each expands to one term per address
+    specificity: float = SPECIFICITY_DEFAULT
+    when: str = ALWAYS
+    category: str = "streaming"
+
+    @property
+    def title(self) -> str:
+        return f"{self.service} ({self.variant})" if self.variant else self.service
+
+    @staticmethod
+    def _join(terms: List[str]) -> str:
+        return terms[0] if len(terms) == 1 else any_of(terms)
+
+    def build(self, hosts: Mapping[str, Sequence[str]]) -> str:
+        """The nfdump filter, with host sets filled in ('' if nothing is left to match)."""
+        out: List[str] = []
+        for t in self.terms:
+            if isinstance(t, Each):
+                out += [t.template.format(ip=ip) for ip in hosts.get(t.hosts, ())]
+            else:
+                out.append(t)
+        return self._join(out) if out else ""
+
+    def describe(self) -> str:
+        """The filter as shown by `flowspot signatures` (host sets as <placeholders>)."""
+        return self._join([
+            t.template.format(ip=f"<{t.hosts} addresses>") if isinstance(t, Each) else t for t in self.terms
+        ])
+
+
+def _youtube_terms(variant: str) -> Tuple[Term, ...]:
     templates = YOUTUBE_VARIANTS[variant]
-    return any_of(
-        any_of(t.format(n=f"net {net}") for t in templates) for net in GOOGLE_NETS
-    )
+    return tuple(any_of(t.format(n=f"net {net}") for t in templates) for net in GOOGLE_NETS)
 
 
-def streaming_rules(
-    grooveshark_ips: Sequence[str],
-    nacevi_ips: Sequence[str],
-    szn_dispatchers: Sequence[str],
-    generic: bool = False,
-) -> List[Rule]:
-    """Build the streaming rules, in report order.
+# In report order.
+STREAMING_SPECS: Tuple[RuleSpec, ...] = (
+    RuleSpec("abradio.cz", "web browser", (f"net {ABRADIO_ZKOUKNITO_NET} AND packets < 200",), 0.45),
+    RuleSpec("abradio.cz", "player", (f"net {ABRADIO_ZKOUKNITO_NET} AND packets > 300 AND pps < 20",), 0.6),
+    RuleSpec("grooveshark.com", "", (Each("grooveshark", "src ip {ip}"), f"net {GROOVESHARK_NET} AND bpp > 1400")),
+    RuleSpec("play.prima.cz", "", tuple(f"src net {n} AND bpp > 1300" for n in PRIMA_NETS)),
+    RuleSpec("koukni.cz", "", (f"src net {KOUKNI_NET} AND packets > 1000 AND bpp > 1300",)),
+    RuleSpec("nacevi/visual", "ceskatelevize.cz, ivysilani.cz, topfun.cz, ...",
+             (Each("nacevi", "src ip {ip}"), *(f"src net {n}" for n in NACEVI_NETS))),
+    RuleSpec("voyo.cz", "", tuple(f"src net {n}" for n in NACEVI_NETS)),
+    RuleSpec("mixer.cz", "",
+             (Each("szn_seen", "src ip {ip} AND bpp > 1000"),
+              *(f"src net {n} AND packets > 1000 AND bpp > 1000" for n in SZN_NETS)), when=SZN_SEEN),
+    RuleSpec("play.cz", "web browser", (f"net {PLAY_NET} AND pps < 10",), 0.45),
+    RuleSpec("play.cz", "player", (f"net {PLAY_NET} AND pps > 10",), 0.6),
+    RuleSpec("seznam.cz", "live concerts, films, ...",
+             tuple(f"src net {n} AND duration > 30000 AND bpp > 1400 AND pps > 50 AND pps < 150" for n in SZN_NETS),
+             when=SZN_UNSEEN),
+    RuleSpec("stream.cz", "",
+             (Each("szn_seen", "src ip {ip} AND bpp > 1200"),
+              *(f"src net {n} AND packets > 1000 AND bpp > 1200" for n in SZN_NETS)), when=SZN_SEEN),
+    RuleSpec("ulozto.cz/live", "", (f"src net {ULOZTO_NET} AND pps > 100 AND pps < 600 AND bpp > 1400",)),
+    *(RuleSpec("youtube.com", v, _youtube_terms(v), 0.7) for v in ("live", "html5", "https", "http")),
+    RuleSpec("zkouknito.cz", "", (f"net {ABRADIO_ZKOUKNITO_NET} AND pps > 60",), 0.5),
+    RuleSpec("generic streaming heuristic", "", (GENERIC_FILTER,), 0.35, when=GENERIC),
+)
 
-    ``szn_dispatchers`` are the Seznam CDN dispatcher addresses actually seen
-    as flow sources in the capture; when there are some, Mixer/Stream are
-    searched, otherwise the Seznam "live" heuristic is used instead.
+
+def streaming_rules(hosts: Mapping[str, Sequence[str]], generic: bool = False) -> List[Rule]:
+    """The streaming rules that apply, in report order, with host sets filled in.
+
+    ``hosts`` maps "grooveshark", "nacevi" and "szn_seen" to addresses. "szn_seen" are the Seznam CDN
+    dispatchers actually seen as flow sources in the capture: when there are some, mixer.cz/stream.cz
+    are searched, otherwise the Seznam "live" heuristic is used instead.
     """
-    r: List[Rule] = []
-    add = lambda s, v, f: r.append(Rule(s, v, f))  # noqa: E731
-
-    add("abradio.cz", "web browser", f"net {ABRADIO_ZKOUKNITO_NET} AND packets < 200")
-    add("abradio.cz", "player", f"net {ABRADIO_ZKOUKNITO_NET} AND packets > 300 AND pps < 20")
-    add(
-        "grooveshark.com", "",
-        any_of([f"src ip {ip}" for ip in grooveshark_ips] + [f"net {GROOVESHARK_NET} AND bpp > 1400"]),
-    )
-    add("play.prima.cz", "", any_of(f"src net {n} AND bpp > 1300" for n in PRIMA_NETS))
-    add("koukni.cz", "", f"src net {KOUKNI_NET} AND packets > 1000 AND bpp > 1300")
-    add(
-        "nacevi/visual", "ceskatelevize.cz, ivysilani.cz, topfun.cz, ...",
-        any_of([f"src ip {ip}" for ip in nacevi_ips] + [f"src net {n}" for n in NACEVI_NETS]),
-    )
-    add("voyo.cz", "", any_of(f"src net {n}" for n in NACEVI_NETS))
-    if szn_dispatchers:
-        add(
-            "mixer.cz", "",
-            any_of(
-                [f"src ip {ip} AND bpp > 1000" for ip in szn_dispatchers]
-                + [f"src net {n} AND packets > 1000 AND bpp > 1000" for n in SZN_NETS]
-            ),
-        )
-    add("play.cz", "web browser", f"net {PLAY_NET} AND pps < 10")
-    add("play.cz", "player", f"net {PLAY_NET} AND pps > 10")
-    if not szn_dispatchers:
-        add(
-            "seznam.cz", "live concerts, films, ...",
-            any_of(
-                f"src net {n} AND duration > 30000 AND bpp > 1400 AND pps > 50 AND pps < 150"
-                for n in SZN_NETS
-            ),
-        )
-    if szn_dispatchers:
-        add(
-            "stream.cz", "",
-            any_of(
-                [f"src ip {ip} AND bpp > 1200" for ip in szn_dispatchers]
-                + [f"src net {n} AND packets > 1000 AND bpp > 1200" for n in SZN_NETS]
-            ),
-        )
-    add("ulozto.cz/live", "", f"src net {ULOZTO_NET} AND pps > 100 AND pps < 600 AND bpp > 1400")
-    for variant in ("live", "html5", "https", "http"):
-        add("youtube.com", variant, _youtube_filter(variant))
-    add("zkouknito.cz", "", f"net {ABRADIO_ZKOUKNITO_NET} AND pps > 60")
+    active = {ALWAYS, SZN_SEEN if hosts.get("szn_seen") else SZN_UNSEEN}
     if generic:
-        add("generic streaming heuristic", "", GENERIC_FILTER)
-    return r
+        active.add(GENERIC)
+    built = [(spec, spec.build(hosts)) for spec in STREAMING_SPECS if spec.when in active]
+    return [Rule(spec.service, spec.variant, flt) for spec, flt in built if flt]
 
 
 ALL_DNS_HOSTS = GROOVESHARK_HOSTS + NACEVI_HOSTS + SZN_DISPATCHER_HOSTS
@@ -619,7 +682,7 @@ def run_streaming(
     rows = nf.query(any_of(f"src ip {ip}" for ip in dispatchers), "%sa")
     seen = sorted({ip for ip in (parse_ip(r[0]) for r in rows) if ip}, key=ip_sort_key)
 
-    rules = streaming_rules(groove_ips, nacevi_ips, seen, generic)
+    rules = streaming_rules({"grooveshark": groove_ips, "nacevi": nacevi_ips, "szn_seen": seen}, generic)
     results = gather(report, [(r.title, lambda r=r: nf.detect(r.service, r.variant, r.filter, "streaming")) for r in rules], nf.jobs)
     report.detections.extend(d for d in results if d is not None)  # type: ignore[misc]
     _note_truncation(report, nf)
@@ -654,73 +717,86 @@ SKYPE_FILTER = (
 SKYPE_MICROSOFT_NET = "157.56.0.0/16"
 
 
-def _endpoints(rows: Iterable[Sequence[str]], ip_col: int, port_col: int, min_port: int = 0) -> Set[Tuple[str, int]]:
-    out: Set[Tuple[str, int]] = set()
-    for r in rows:
-        if len(r) <= max(ip_col, port_col):
-            continue
-        ip, port = parse_ip(r[ip_col]), parse_port(r[port_col])
-        if ip is not None and port is not None and port >= min_port:
-            out.add((ip, port))
-    return out
+REMOTE_SPECS: Tuple[RuleSpec, ...] = (
+    RuleSpec("ssh -X", "X11 forwarding", (SSH_X_FILTER,), 0.6, category="remote"),
+    RuleSpec("VNC", "", (VNC_FILTER,), 0.8, category="remote"),
+)
+# Multi-stage detectors (their filters are built from earlier results).
+STAGED_SPECIFICITY: Dict[Tuple[str, str], float] = {("TeamViewer", ""): 0.75, ("Skype", "experimental"): 0.3}
+
+
+def _endpoint(row: Sequence[str], ip_col: int, port_col: int, min_port: int = 0) -> Optional[Tuple[str, int]]:
+    """(address, port) from two columns of an output row, or None if either is invalid."""
+    if len(row) <= max(ip_col, port_col):
+        return None
+    ip, port = parse_ip(row[ip_col]), parse_port(row[port_col])
+    return (ip, port) if ip is not None and port is not None and port >= min_port else None
 
 
 def _teamviewer(nf: NfDump) -> Detection:
     flt_desc = f"{TEAMVIEWER_TCP_FILTER}  ->  {TEAMVIEWER_UDP_FILTER.format(p='<port>')}"
-    tcp_rows = nf.query(TEAMVIEWER_TCP_FILTER, "%sa,%da,%sp,%dp")
-    tcp_sports = sorted({p for _, p in _endpoints(tcp_rows, 0, 2)})
-    # NOTE: pairs destination address with *source* port, exactly like the
-    # original thesis script; "port N" in nfdump matches either direction.
-    port_pairs = _endpoints(tcp_rows, 1, 2, min_port=1000)
+    tcp_sports: Set[int] = set()
+    port_pairs: Set[Tuple[str, int]] = set()
+    for row in nf.stream(TEAMVIEWER_TCP_FILTER, "%sa,%da,%sp,%dp"):
+        src = _endpoint(row, 0, 2)
+        if src:
+            tcp_sports.add(src[1])
+        # NOTE: pairs the destination address with the *source* port, exactly like the
+        # original thesis script; "port N" in nfdump matches either direction.
+        dst = _endpoint(row, 1, 2, min_port=1000)
+        if dst:
+            port_pairs.add(dst)
     dport_pairs: Set[Tuple[str, int]] = set()
     if tcp_sports:
-        udp_rows = nf.query(any_of(TEAMVIEWER_UDP_FILTER.format(p=p) for p in tcp_sports), "%da,%dp")
-        dport_pairs = _endpoints(udp_rows, 0, 1, min_port=1000)
+        flt = any_of(TEAMVIEWER_UDP_FILTER.format(p=p) for p in sorted(tcp_sports))
+        for row in nf.stream(flt, "%da,%dp"):
+            ep = _endpoint(row, 0, 1, min_port=1000)
+            if ep:
+                dport_pairs.add(ep)
     if not (dport_pairs and port_pairs):
-        return Detection("TeamViewer", "", flt_desc, [])
+        return Detection("TeamViewer", "", flt_desc, [], "remote")
     pairs = sorted(dport_pairs | port_pairs, key=lambda t: (ip_sort_key(t[0]), t[1]))
-    flt = any_of(f"ip {ip} AND port {port}" for ip, port in pairs)
-    return nf.detect("TeamViewer", "", flt)
+    return nf.detect("TeamViewer", "", any_of(f"ip {ip} AND port {port}" for ip, port in pairs), "remote")
 
 
 def _skype(nf: NfDump, report: Report) -> Detection:
-    rows = nf.query(SKYPE_FILTER, "%da,%dp")
-    hosts = sorted({ip for ip, _ in _endpoints(rows, 0, 1)}, key=ip_sort_key)
-    # Five-digit ports seen in at least two flows (the original `uniq -d`).
+    hosts: Set[str] = set()
     counts: Counter = Counter()
-    for r in rows:
-        counts.update(_endpoints([r], 0, 1, min_port=10000))
+    for row in nf.stream(SKYPE_FILTER, "%da,%dp"):
+        ep = _endpoint(row, 0, 1)
+        if ep:
+            hosts.add(ep[0])
+        high = _endpoint(row, 0, 1, min_port=10000)
+        if high:
+            counts[high] += 1
+    # Five-digit ports seen in at least two flows (the original `uniq -d`).
     repeated = sorted((p for p, n in counts.items() if n >= 2), key=lambda t: (ip_sort_key(t[0]), t[1]))
     if not repeated:
-        return Detection("Skype", "experimental", SKYPE_FILTER, [])
+        return Detection("Skype", "experimental", SKYPE_FILTER, [], "remote")
     terms = [f"proto UDP AND dst ip {ip} AND dst port {port}" for ip, port in repeated]
-    for ip in hosts:
+    for ip in sorted(hosts, key=ip_sort_key):
         for port in (443, 80):
             terms.append(
                 f"dst ip {ip} AND packets < 10 AND bpp < 60 AND bpp > 50 AND port {port} "
                 "AND flags A AND not flags RUS"
             )
     terms.append(f"src net {SKYPE_MICROSOFT_NET} AND proto TCP")
-    flt = any_of(terms)
     report.notes.append("Skype candidates (UDP): " + ", ".join(f"{ip}:{p}" for ip, p in repeated))
-    return nf.detect("Skype", "experimental", flt)
+    return nf.detect("Skype", "experimental", any_of(terms), "remote")
 
 
 def run_remote(nf: NfDump, skype: bool) -> Report:
     report = Report("remote", str(nf.capture))
     tasks: List[Tuple[str, Callable[[], object]]] = [
-        ("ssh -X", lambda: nf.detect("ssh -X", "X11 forwarding", SSH_X_FILTER)),
-        ("VNC", lambda: nf.detect("VNC", "", VNC_FILTER)),
-        ("TeamViewer", lambda: _teamviewer(nf)),
+        (spec.title, lambda spec=spec: nf.detect(spec.service, spec.variant, spec.build({}), spec.category))
+        for spec in REMOTE_SPECS
     ]
+    tasks.append(("TeamViewer", lambda: _teamviewer(nf)))
     if skype:
         tasks.append(("Skype", lambda: _skype(nf, report)))
     else:
         report.notes.append("Skype detection is off (it was disabled in the original scripts); enable with --skype")
-    for det in gather(report, tasks, nf.jobs):
-        if det is not None:
-            det.category = "remote"  # type: ignore[attr-defined]
-            report.detections.append(det)  # type: ignore[arg-type]
+    report.detections.extend(d for d in gather(report, tasks, nf.jobs) if d is not None)  # type: ignore[misc]
     _note_truncation(report, nf)
     return report
 
@@ -733,24 +809,29 @@ CAMERA_PORT_RANGE = (10, 9999)  # the original only considered 2-4 digit ports
 BUSY_BPP = 2000  # ports that carry bulk data (> 2000 bytes/packet) are not cameras
 
 
+def _order(key: Union[str, int]) -> Tuple[int, int]:
+    """Numeric ordering for ties: addresses by value, ports by number (not as text)."""
+    return ip_sort_key(key) if isinstance(key, str) else (0, key)
+
+
 def _top(counter_bytes: Counter, counter_pkts: Counter, n: int) -> Tuple[Set, Set]:
-    by_bytes = sorted(counter_bytes.items(), key=lambda kv: (-kv[1], str(kv[0])))[:n]
+    by_bytes = sorted(counter_bytes.items(), key=lambda kv: (-kv[1], _order(kv[0])))[:n]
     bpp = {k: counter_bytes[k] // max(counter_pkts[k], 1) for k in counter_bytes}
-    by_bpp = sorted(bpp.items(), key=lambda kv: (-kv[1], str(kv[0])))[:n]
+    by_bpp = sorted(bpp.items(), key=lambda kv: (-kv[1], _order(kv[0])))[:n]
     return {k for k, _ in by_bytes}, {k for k, _ in by_bpp}
 
 
 def run_ipcam(nf: NfDump, net: str, ignore_ports: Sequence[int], top: int) -> Report:
     report = Report("ipcam", str(nf.capture))
-    rows = nf.query(f"src net {net} AND dst net {net}", "%sa,%da,%sp,%dp,%pkt,%byt")
+    inside = f"src net {net} AND dst net {net}"
 
+    # Pass 1: per-host and per-port totals, accumulated while nfdump streams (memory ~ distinct hosts/ports).
     ip_bytes: Counter = Counter()
     ip_pkts: Counter = Counter()
     port_bytes: Counter = Counter()
     port_pkts: Counter = Counter()
     busy: Set[int] = set()
-    seen: List[Tuple[str, str, int, int]] = []
-    for r in rows:
+    for r in nf.stream(inside, "%sa,%da,%sp,%dp,%pkt,%byt"):
         if len(r) != 6:
             continue
         sa, da, sp, dp = parse_ip(r[0]), parse_ip(r[1]), parse_port(r[2]), parse_port(r[3])
@@ -758,9 +839,8 @@ def run_ipcam(nf: NfDump, net: str, ignore_ports: Sequence[int], top: int) -> Re
             pkts, nbytes = int(r[4]), int(r[5])
         except ValueError:
             continue
-        if None in (sa, da, sp, dp):
+        if sa is None or da is None or sp is None or dp is None:
             continue
-        seen.append((sa, da, sp, dp))  # type: ignore[arg-type]
         for ip in {sa, da}:
             ip_bytes[ip] += nbytes
             ip_pkts[ip] += pkts
@@ -775,10 +855,13 @@ def run_ipcam(nf: NfDump, net: str, ignore_ports: Sequence[int], top: int) -> Re
     candidates_by_traffic = sorted(a & b, key=ip_sort_key)
     a, b = _top(port_bytes, port_pkts, top)
     lo, hi = CAMERA_PORT_RANGE
-    stat_ports = {p for p in a & b if lo <= p <= hi}
-    camera_ports = sorted(stat_ports - busy - set(ignore_ports))
+    camera_ports = sorted({p for p in a & b if lo <= p <= hi} - busy - set(ignore_ports))
 
-    by_port = {sa for sa, _da, sp, dp in seen if sp in camera_ports or dp in camera_ports}
+    # Pass 2: which hosts send on those ports (the original script did the same second query).
+    by_port: Set[str] = set()
+    if camera_ports:
+        flt = f"{inside} AND ({' OR '.join(f'port {p}' for p in camera_ports)})"
+        by_port = {ip for ip in (parse_ip(r[0]) for r in nf.stream(flt, "%sa") if r) if ip}
     candidates_by_port = sorted(by_port, key=ip_sort_key)
     likely = sorted(set(candidates_by_traffic) & by_port, key=ip_sort_key)
 
@@ -799,23 +882,10 @@ def run_ipcam(nf: NfDump, net: str, ignore_ports: Sequence[int], top: int) -> Re
 
 PRIVATE_NETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 
-# How specific a signature is, 0..1.  A rule tied to one service's own network
-# range plus behaviour limits is strong; one that matches on a shared prefix, a
-# well-known port or pure traffic shape is weak.  These are judgement calls
-# made by the author, NOT statistically calibrated probabilities.
-SPECIFICITY_DEFAULT = 0.85
+# Specificity of every rule comes from its RuleSpec (see above); multi-stage detectors are listed separately.
 SPECIFICITY: Dict[Tuple[str, str], float] = {
-    ("abradio.cz", "web browser"): 0.45,
-    ("abradio.cz", "player"): 0.6,
-    ("play.cz", "web browser"): 0.45,
-    ("play.cz", "player"): 0.6,
-    ("zkouknito.cz", ""): 0.5,
-    ("youtube.com", ""): 0.7,
-    ("generic streaming heuristic", ""): 0.35,
-    ("ssh -X", "X11 forwarding"): 0.6,
-    ("VNC", ""): 0.8,
-    ("TeamViewer", ""): 0.75,
-    ("Skype", "experimental"): 0.3,
+    **{(s.service, s.variant): s.specificity for s in STREAMING_SPECS + REMOTE_SPECS},
+    **STAGED_SPECIFICITY,
 }
 CAMERA_SPECIFICITY = 0.5
 # Services that share (part of) a network range: when both hit, neither is certain.
@@ -998,23 +1068,25 @@ def render_text(report: Report, show_filters: bool) -> str:
 
 
 def render_signatures() -> str:
-    out = ["Detection signatures (nfdump filter syntax). Host lists marked <...> are filled in at run time.\n"]
-    rules = {
-        (r.service, r.variant): r
-        for r in streaming_rules([], [], [], True)  # Seznam "live" variant first,
-        + streaming_rules(["<grooveshark IPs>"], ["<nacevi IPs>"], ["<seznam dispatchers>"], True)  # placeholders win
-    }
-    out.append("== streaming ==")
-    for rule in rules.values():
-        out.append(f"\n[{rule.title}]\n  {rule.filter}")
+    out = [
+        "Detection signatures (nfdump filter syntax). <...> marks host lists filled in at run time.",
+        "specificity = how much a match tells you (0..1), used by the auto-mode score.",
+    ]
+
+    def spec_block(specs: Sequence[RuleSpec]) -> None:
+        for sp in specs:
+            out.append(f"\n[{sp.title}]  specificity {sp.specificity}{CONDITIONS[sp.when]}\n  {sp.describe()}")
+
+    out.append("\n== streaming ==")
+    spec_block(STREAMING_SPECS)
+    out.append("\n== remote ==")
+    spec_block(REMOTE_SPECS)
     out += [
-        "\n== remote ==",
-        f"\n[ssh -X (X11 forwarding)]\n  {SSH_X_FILTER}",
-        f"\n[VNC]\n  {VNC_FILTER}",
-        f"\n[TeamViewer] (two stages)\n  1. {TEAMVIEWER_TCP_FILTER}\n"
+        f"\n[TeamViewer] (three stages)  specificity {STAGED_SPECIFICITY[('TeamViewer', '')]}\n"
+        f"  1. {TEAMVIEWER_TCP_FILTER}\n"
         f"  2. {TEAMVIEWER_UDP_FILTER.format(p='<source port from stage 1>')}\n"
         "  3. all flows of the (address, port) pairs found",
-        f"\n[Skype] (experimental, --skype)\n  {SKYPE_FILTER}",
+        f"\n[Skype] (experimental, --skype)  specificity {STAGED_SPECIFICITY[('Skype', 'experimental')]}\n  {SKYPE_FILTER}",
         "\n== ipcam ==\n"
         "  Computed in Python from all flows inside --net: hosts and ports that are in the top-N by bytes\n"
         f"  AND by bytes/packet, minus ports with > {BUSY_BPP} bytes/packet and minus --ignore-port.",

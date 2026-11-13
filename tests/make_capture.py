@@ -81,18 +81,15 @@ def free_udp_port() -> int:
         return s.getsockname()[1]
 
 
-def build(out_dir: Path, nfcapd: Optional[str] = None) -> Path:
-    nfcapd = nfcapd or shutil.which("nfcapd")
-    if not nfcapd:
-        raise RuntimeError("nfcapd not found in PATH")
-    out_dir.mkdir(parents=True, exist_ok=True)
+def _collect(out_dir: Path, nfcapd: str, delay: float) -> Optional[Path]:
+    """One attempt: run nfcapd, send the records, stop it, return the file (or None)."""
     port = free_udp_port()
     proc = subprocess.Popen(
         [nfcapd, "-b", "127.0.0.1", "-p", str(port), "-l", str(out_dir), "-I", "flowspot-test"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
-        time.sleep(1.0)
+        time.sleep(delay)
         if proc.poll() is not None:
             raise RuntimeError(f"nfcapd exited early with status {proc.returncode}")
         records = flows()
@@ -102,7 +99,7 @@ def build(out_dir: Path, nfcapd: Optional[str] = None) -> Path:
                 chunk = records[i:i + 5]
                 s.sendto(v5_packet(chunk, seq), ("127.0.0.1", port))
                 seq += len(chunk)
-        time.sleep(1.0)
+        time.sleep(delay)
     finally:
         proc.send_signal(signal.SIGTERM)  # nfcapd flushes and closes the current file on SIGTERM
         try:
@@ -110,11 +107,31 @@ def build(out_dir: Path, nfcapd: Optional[str] = None) -> Path:
         except subprocess.TimeoutExpired:
             proc.kill()
     files = sorted(p for p in out_dir.iterdir() if p.name.startswith("nfcapd.") and "current" not in p.name)
-    if not files:
-        files = sorted(out_dir.glob("nfcapd.*"))
-    if not files:
-        raise RuntimeError(f"nfcapd produced no file in {out_dir}")
-    return files[-1]
+    return files[-1] if files else None
+
+
+def _record_count(path: Path) -> int:
+    nfdump = shutil.which("nfdump")
+    if not nfdump:
+        raise RuntimeError("nfdump not found in PATH")
+    out = subprocess.run([nfdump, "-r", str(path), "-q", "-N", "-o", "fmt:%sa"],
+                         capture_output=True, text=True, check=False).stdout
+    return sum(1 for line in out.splitlines() if line.strip() and "no matching" not in line.lower())
+
+
+def build(out_dir: Path, nfcapd: Optional[str] = None, attempts: int = 4) -> Path:
+    """Build the capture; UDP is lossy and timing varies, so verify the record count and retry."""
+    nfcapd = nfcapd or shutil.which("nfcapd")
+    if not nfcapd:
+        raise RuntimeError("nfcapd not found in PATH")
+    expected = len(flows())
+    for attempt in range(attempts):
+        shutil.rmtree(out_dir, ignore_errors=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = _collect(out_dir, nfcapd, delay=1.0 + attempt)  # slower on every retry
+        if path is not None and _record_count(path) == expected:
+            return path
+    raise RuntimeError(f"could not build a complete capture in {attempts} attempts")
 
 
 if __name__ == "__main__":
