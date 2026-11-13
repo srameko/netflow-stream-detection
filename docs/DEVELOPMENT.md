@@ -36,7 +36,7 @@ python3 -m venv /tmp/venv && /tmp/venv/bin/pip install coverage
 ### How the functional tests work
 
 `make_capture.py` starts `nfcapd` on a free loopback UDP port, sends hand-built NetFlow v5 packets that imitate
-each scenario (ulož.to stream, VNC, ssh -X, YouTube, TeamViewer, an IP camera with a NAS and chatter), stops
+each scenario (ulozto.cz stream, VNC, ssh -X, YouTube, TeamViewer, an IP camera with a NAS and chatter), stops
 `nfcapd` with SIGTERM and returns the resulting file. The tests then run `python flowspot.py ...` as a subprocess
 against it. They also feed **every filter the tool can generate** to the real nfdump to prove the syntax is valid.
 Nothing leaves the loopback interface.

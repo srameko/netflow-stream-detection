@@ -44,8 +44,9 @@ for how the score is computed – it is a heuristic ranking, not a probability.
 
 ### `streaming`
 
-abradio, grooveshark, iprima, koukni, nacevi/visual (ČT iVysílání, Voyo, TopFun, …), mixer, play.cz, stream.cz,
-ulož.to/live, YouTube (live/html5/https/http), zkouknito.
+abradio, grooveshark, iprima, koukni, nacevi/visual (Czech Television's ivysilani.cz, voyo.cz, topfun.cz, ...),
+mixer, play.cz, stream.cz, ulozto.cz/live, YouTube (live/html5/https/http), zkouknito. These are Czech brand
+names used as identifiers - see *Service names* in [DETECTION.md](DETECTION.md).
 
 | Option | Meaning |
 |---|---|
@@ -114,10 +115,10 @@ and the other stages still report.
 
 ```
 ulozto.cz/live - 3 flow(s)
-  2023-11-14 22:56:40.000  TCP   93.99.92.1:80 -> 10.0.0.2:50001  flags=.AP... packets=5000 bytes=7500000
+  2023-11-14 22:56:40.000  TCP   93.99.92.1:80 -> 10.0.0.2:50001  flags=...AP... packets=5000 bytes=7500000
 ```
 
-Flags use the letters `UAPRSF` (`.` = not set). Records are shown as exported by the router, i.e. in the direction
+Flags use the letters `CEUAPRSF` (CWR, ECE, URG, ACK, PSH, RST, SYN, FIN; `.` = not set). Records are shown as exported by the router, i.e. in the direction
 that matched the signature. Control characters are stripped from everything printed.
 
 ### JSON (`--json`)
@@ -134,7 +135,7 @@ that matched the signature. Control characters are stripped from everything prin
       "filter": "src net 93.99.92.0/24 AND ...",   // exact nfdump filter used
       "truncated": false,             // true when more flows matched than --limit
       "flows": [ { "start": "...", "end": "...", "proto": "TCP", "src": "93.99.92.1", "sport": 80,
-                   "dst": "10.0.0.2", "dport": 50001, "flags": ".AP...", "packets": 5000, "bytes": 7500000 } ]
+                   "dst": "10.0.0.2", "dport": 50001, "flags": "...AP...", "packets": 5000, "bytes": 7500000 } ]
     }
   ],
   "notes": ["DNS look-ups disabled (--no-dns): ..."],   // warnings, skipped stages

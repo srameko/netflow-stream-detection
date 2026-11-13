@@ -190,12 +190,16 @@ def proto_name(text: str) -> str:
 
 
 def flags_str(text: str) -> str:
-    """nfdump -N prints TCP flags as a number; show them as UAPRSF letters ('.' = clear)."""
+    """Normalise TCP flags to the 8-letter form CEUAPRSF ('.' = clear).
+
+    Depending on the nfdump build, -N prints flags as a number (macOS/Homebrew 1.7.10) or already as
+    letters (Ubuntu); a letters string is passed through unchanged.
+    """
     try:
         value = int(text)
     except ValueError:
         return text
-    return "".join(ch if value & bit else "." for ch, bit in zip("UAPRSF", (0x20, 0x10, 0x08, 0x04, 0x02, 0x01)))
+    return "".join(ch if value & bit else "." for ch, bit in zip("CEUAPRSF", (0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01)))
 
 
 def find_nfdump(explicit: Optional[str]) -> str:
@@ -416,6 +420,9 @@ def save_dns_cache(path: Path, hosts: Dict[str, List[str]], when: str) -> None:
 # Signatures: streaming
 # --------------------------------------------------------------------------- #
 
+# NOTE: the service names below (abradio, koukni, nacevi, ulozto, zkouknito, Seznam, ...) are Czech brand
+# names. They are the identifiers shown in the output and are intentionally not translated; see
+# docs/DETECTION.md ("Service names") for what each one is.
 GROOVESHARK_HOSTS = (
     [f"x.cdn{i}.grooveshark.com" for i in range(10)]
     + ["static.a.gs-cdn.net", "cowbell.grooveshark.com", "preview.grooveshark.com"]

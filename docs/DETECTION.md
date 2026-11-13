@@ -6,6 +6,24 @@ The rationale below is read off the filters themselves; extend it with the reaso
 Flow metrics used (nfdump names): `packets`, `bytes`, `bpp` (bytes per packet), `pps` (packets per second),
 `bps`, `duration` (ms), TCP `flags`, `port`, `net`/`ip`.
 
+## Service names
+
+The streaming signatures were written for the **Czech** network the thesis analysed, so the service names
+below are Czech brand names. They are identifiers (they appear in output and JSON) and are deliberately not
+translated; this is what they are (brief, approximate):
+
+| Identifier | What it is |
+|---|---|
+| `abradio.cz`, `play.cz` | Czech internet radio / audio streaming |
+| `grooveshark.com` | music streaming service (US), shut down in 2015 |
+| `play.prima.cz` | video portal of the Czech TV channel Prima |
+| `koukni.cz`, `zkouknito.cz` | Czech video-sharing sites |
+| `nacevi/visual` | CDN used by several Czech TV portals (Czech Television's iVysilani, TopFun, ...) |
+| `voyo.cz` | video-on-demand of the Czech TV channel Nova |
+| `mixer.cz`, `stream.cz`, `seznam.cz` | video/music services of the Czech portal Seznam |
+| `ulozto.cz/live` | Czech file-hosting site, live video streaming |
+| `youtube.com` | YouTube (all Google network ranges) |
+
 ## Streaming (`flowspot streaming`)
 
 Streaming media is long-lived, server→client, bulk: **large packets** (`bpp` > ~1300–1400, i.e. near-MTU),
@@ -18,11 +36,11 @@ and service-specific limits.
 | grooveshark.com | CDN host names resolved via DNS + prefix with large packets |
 | play.prima.cz | two prefixes, large packets from server |
 | koukni.cz | one prefix, > 1000 packets, large packets |
-| nacevi/visual (ČT iVysílání, Voyo, TopFun, …) | CDN host list + prefixes; Voyo = the Nova prefixes alone |
+| nacevi/visual (Czech Television's ivysilani.cz, voyo.cz, topfun.cz, ...) | CDN host list + prefixes; Voyo = the Nova prefixes alone |
 | mixer.cz / stream.cz | Seznam CDN *dispatchers* seen in the capture (then large-packet flows from those hosts / prefixes; stream.cz needs `bpp > 1200`, mixer.cz `> 1000`) |
 | seznam.cz live | used when no dispatcher is seen: Seznam prefixes, long flows (`duration > 30 s`), 50–150 pps |
 | play.cz | one prefix; low pps = web, high pps = player |
-| ulož.to/live | one prefix, 100–600 pps, large packets |
+| ulozto.cz/live | one prefix, 100–600 pps, large packets |
 | zkouknito.cz | prefix shared with abradio.cz, `pps > 60` |
 | YouTube | all Google prefixes; four profiles (live, html5, https, http) built from: large-packet bursts with `APSF` flags, small-packet constant-rate flows with `pps = 0`, and HTTPS flows; flows with typical short-lived durations are excluded |
 | generic (`--generic`) | any server with `packets > 1000`, `5 < pps < 800`, `bpp > 1200` |

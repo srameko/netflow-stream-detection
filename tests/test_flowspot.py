@@ -29,7 +29,14 @@ for rule in spec:
         sys.exit(rule.get("code", 0))
 """
 
-FLOW_ROW = "2013-05-16 10:00:00.000,2013-05-16 10:00:05.000,TCP,{sa},{sp},{da},{dp},.AP...,{pkt},{byt}\n"
+# Service names are Czech brand names used as signature identifiers (see docs/DETECTION.md, "Service names").
+# The tests refer to them through these English role names.
+PREFIX_SERVICE = "ulozto.cz/live"      # signature = one CDN prefix + traffic limits
+STRONG_SERVICE = "koukni.cz"           # a specific (high-confidence) signature
+SHARED_RANGE_A = "abradio.cz"          # these two services share one network range
+SHARED_RANGE_B = "zkouknito.cz"
+
+FLOW_ROW = "2013-05-16 10:00:00.000,2013-05-16 10:00:05.000,TCP,{sa},{sp},{da},{dp},...AP...,{pkt},{byt}\n"
 
 
 class Harness(unittest.TestCase):
@@ -177,12 +184,12 @@ class CliTests(Harness):
         self.assertEqual(code, flowspot.EXIT_ERROR)
         self.assertIn("boom", err)
 
-    def test_streaming_no_dns_finds_ulozto(self):
+    def test_streaming_without_dns_matches_prefix_rule(self):
         row = FLOW_ROW.format(sa="93.99.92.7", sp=80, da="10.0.0.2", dp=50000, pkt=5000, byt=7_000_000)
         self.set_rules([{"match": "93.99.92.0/24", "out": row}])
         code, out, _ = self.run_cli("streaming", str(self.capture), "--nfdump", str(self.fake), "--no-dns")
         self.assertEqual(code, flowspot.EXIT_FOUND)
-        self.assertIn("ulozto.cz/live - 1 flow(s)", out)
+        self.assertIn(f"{PREFIX_SERVICE} - 1 flow(s)", out)
         self.assertIn("DNS look-ups disabled", out)
 
     def test_teamviewer_two_stage(self):
@@ -335,7 +342,7 @@ class PartialFailureTests(Harness):
         ])
         code, out, _ = self.run_cli("streaming", str(self.capture), "--nfdump", str(self.fake), "--no-dns")
         self.assertEqual(code, flowspot.EXIT_FOUND)
-        self.assertIn("ulozto.cz/live", out)
+        self.assertIn(PREFIX_SERVICE, out)
         self.assertIn("skipped", out)
 
     def test_everything_failing_is_an_error(self):
@@ -384,7 +391,7 @@ class SeznamAndSkypeTests(Harness):
 
 class ScoringTests(unittest.TestCase):
     def det(self, service, variant, n, category="streaming", src="1.1.1.1"):
-        flows = [flowspot.Flow("t", "t", "TCP", src, 80, "10.0.0.1", 5000 + i, ".AP...", 10, 1000) for i in range(n)]
+        flows = [flowspot.Flow("t", "t", "TCP", src, 80, "10.0.0.1", 5000 + i, "...AP...", 10, 1000) for i in range(n)]
         return flowspot.Detection(service, variant, "f", flows, category)
 
     def report(self, *dets, cameras=None):
@@ -394,15 +401,15 @@ class ScoringTests(unittest.TestCase):
         return r
 
     def test_more_evidence_scores_higher_and_is_bounded(self):
-        scores = [flowspot.assess(self.report(self.det("koukni.cz", "", n)))[0]["score"] for n in (1, 3, 10, 100)]
+        scores = [flowspot.assess(self.report(self.det(STRONG_SERVICE, "", n)))[0]["score"] for n in (1, 3, 10, 100)]
         self.assertEqual(scores, sorted(scores))
         self.assertLessEqual(scores[-1], 1.0)
         self.assertLess(scores[0], flowspot.LIKELY)
         self.assertGreaterEqual(scores[2], flowspot.LIKELY)
 
     def test_specific_signature_beats_weak_one(self):
-        v = flowspot.assess(self.report(self.det("koukni.cz", "", 5), self.det("generic streaming heuristic", "", 5)))
-        self.assertEqual(v[0]["service"], "koukni.cz")
+        v = flowspot.assess(self.report(self.det(STRONG_SERVICE, "", 5), self.det("generic streaming heuristic", "", 5)))
+        self.assertEqual(v[0]["service"], STRONG_SERVICE)
 
     def test_labels(self):
         self.assertEqual(flowspot._label(0.9), "likely")
@@ -410,11 +417,11 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(flowspot._label(0.1), "weak")
 
     def test_ambiguous_pair_is_penalised_and_flagged(self):
-        alone = flowspot.assess(self.report(self.det("zkouknito.cz", "", 6)))[0]["score"]
-        both = flowspot.assess(self.report(self.det("zkouknito.cz", "", 6), self.det("abradio.cz", "player", 6)))
-        z = next(e for e in both if e["service"] == "zkouknito.cz")
+        alone = flowspot.assess(self.report(self.det(SHARED_RANGE_B, "", 6)))[0]["score"]
+        both = flowspot.assess(self.report(self.det(SHARED_RANGE_B, "", 6), self.det(SHARED_RANGE_A, "player", 6)))
+        z = next(e for e in both if e["service"] == SHARED_RANGE_B)
         self.assertLess(z["score"], alone)
-        self.assertEqual(z["ambiguous_with"], "abradio.cz")
+        self.assertEqual(z["ambiguous_with"], SHARED_RANGE_A)
 
     def test_variants_are_merged_per_service(self):
         v = flowspot.assess(self.report(self.det("youtube.com", "live", 2), self.det("youtube.com", "http", 4)))
@@ -422,7 +429,7 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(sorted(v[0]["variants"]), ["http", "live"])
 
     def test_empty_detections_give_empty_verdict(self):
-        self.assertEqual(flowspot.assess(self.report(self.det("koukni.cz", "", 0))), [])
+        self.assertEqual(flowspot.assess(self.report(self.det(STRONG_SERVICE, "", 0))), [])
 
     def test_camera_entry(self):
         v = flowspot.assess(self.report(cameras={"192.168.0.0/16": {"likely_cameras": ["192.168.1.50"]}}))
@@ -430,17 +437,19 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(v[0]["addresses"], ["192.168.1.50"])
 
     def test_ranking_is_descending(self):
-        v = flowspot.assess(self.report(self.det("ulozto.cz/live", "", 8), self.det("VNC", "", 1), self.det("koukni.cz", "", 3)))
+        v = flowspot.assess(self.report(self.det(PREFIX_SERVICE, "", 8), self.det("VNC", "", 1), self.det(STRONG_SERVICE, "", 3)))
         scores = [e["score"] for e in v]
         self.assertEqual(scores, sorted(scores, reverse=True))
 
 
 class FormatTests(unittest.TestCase):
     def test_flags_and_proto(self):
-        self.assertEqual(flowspot.flags_str("24"), ".AP...")
-        self.assertEqual(flowspot.flags_str("27"), ".AP.SF")
-        self.assertEqual(flowspot.flags_str("0"), "......")
-        self.assertEqual(flowspot.flags_str(".AP..."), ".AP...")
+        self.assertEqual(flowspot.flags_str("24"), "...AP...")
+        self.assertEqual(flowspot.flags_str("27"), "...AP.SF")
+        self.assertEqual(flowspot.flags_str("0"), "........")
+        self.assertEqual(flowspot.flags_str("...AP..."), "...AP...")
+        self.assertEqual(flowspot.flags_str("192"), "CE......")  # CWR + ECE bits
+        self.assertEqual(flowspot.flags_str("255"), "CEUAPRSF")
         self.assertEqual((flowspot.proto_name("6"), flowspot.proto_name("17"), flowspot.proto_name("99")),
                          ("TCP", "UDP", "99"))
 
@@ -470,7 +479,7 @@ class AutoCliTests(Harness):
         self.set_rules([{"match": "93.99.92.0/24", "out": row}])
         code, out, _ = self.run_cli(str(self.capture), "--nfdump", str(self.fake), "--no-dns")
         self.assertEqual(code, flowspot.EXIT_FOUND)
-        self.assertIn("ulozto.cz/live", out)
+        self.assertIn(PREFIX_SERVICE, out)
         self.assertIn("not calibrated probabilities", out)
 
     def test_auto_nothing_found(self):
@@ -485,7 +494,7 @@ class AutoCliTests(Harness):
         data = json.loads(out)
         self.assertNotIn("_examples", data["extra"])
         self.assertTrue(data["found"])
-        self.assertEqual(data["extra"]["verdict"][0]["service"], "ulozto.cz/live")
+        self.assertEqual(data["extra"]["verdict"][0]["service"], PREFIX_SERVICE)
 
     def test_auto_net_restricts_camera_probe(self):
         self.run_cli(str(self.capture), "--nfdump", str(self.fake), "--no-dns", "--net", "172.20.0.0/16")
@@ -582,14 +591,14 @@ class RenderingAndEdgeTests(Harness):
 
     def test_auto_text_shows_ambiguity_variants_and_cameras(self):
         rep = flowspot.Report("auto", "cap.nfcapd", [
-            flowspot.Detection("zkouknito.cz", "", "f", [flowspot.Flow("t", "t", "TCP", "1.1.1.1", 1, "2.2.2.2", 2, ".A....", 9, 9)] * 5, "streaming"),
-            flowspot.Detection("abradio.cz", "player", "f", [flowspot.Flow("t", "t", "TCP", "1.1.1.2", 1, "2.2.2.2", 2, ".A....", 9, 9)] * 5, "streaming"),
-            flowspot.Detection("youtube.com", "live", "f", [flowspot.Flow("t", "t", "TCP", "9.9.9.9", 1, "2.2.2.2", 2, ".A....", 9, 9)] * 5, "streaming"),
+            flowspot.Detection(SHARED_RANGE_B, "", "f", [flowspot.Flow("t", "t", "TCP", "1.1.1.1", 1, "2.2.2.2", 2, "...A....", 9, 9)] * 5, "streaming"),
+            flowspot.Detection(SHARED_RANGE_A, "player", "f", [flowspot.Flow("t", "t", "TCP", "1.1.1.2", 1, "2.2.2.2", 2, "...A....", 9, 9)] * 5, "streaming"),
+            flowspot.Detection("youtube.com", "live", "f", [flowspot.Flow("t", "t", "TCP", "9.9.9.9", 1, "2.2.2.2", 2, "...A....", 9, 9)] * 5, "streaming"),
         ])
         rep.extra["cameras"] = {"10.0.0.0/8": {"likely_cameras": ["10.0.0.50"]}}
         rep.extra["verdict"] = flowspot.assess(rep)
         text = flowspot.render_auto(rep, examples=1)
-        self.assertIn("shares a network range with abradio.cz", text)
+        self.assertIn(f"shares a network range with {SHARED_RANGE_A}", text)
         self.assertIn("youtube.com (live)", text)
         self.assertIn("10.0.0.50", text)
         self.assertIn("e.g.", text)

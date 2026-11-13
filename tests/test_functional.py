@@ -13,6 +13,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# Czech brand name used as a signature identifier: one CDN prefix + traffic limits (docs/DETECTION.md).
+PREFIX_SERVICE = "ulozto.cz/live"
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -72,12 +75,12 @@ class Functional(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         data = json.loads(p.stdout)
         hits = {(d["service"], d["variant"]): len(d["flows"]) for d in data["detections"] if d["flows"]}
-        self.assertEqual(hits[("ulozto.cz/live", "")], 3)
+        self.assertEqual(hits[(PREFIX_SERVICE, "")], 3)
         self.assertEqual(hits[("youtube.com", "html5")], 1)
-        ulozto = next(d for d in data["detections"] if d["service"] == "ulozto.cz/live")
-        self.assertEqual({f["src"] for f in ulozto["flows"]}, {"93.99.92.1", "93.99.92.2", "93.99.92.3"})
-        self.assertEqual(ulozto["flows"][0]["proto"], "TCP")
-        self.assertEqual(ulozto["flows"][0]["flags"], ".AP...")
+        hit = next(d for d in data["detections"] if d["service"] == PREFIX_SERVICE)
+        self.assertEqual({f["src"] for f in hit["flows"]}, {"93.99.92.1", "93.99.92.2", "93.99.92.3"})
+        self.assertEqual(hit["flows"][0]["proto"], "TCP")
+        self.assertEqual(hit["flows"][0]["flags"], "...AP...")
 
     def test_streaming_generic_flag(self):
         plain = json.loads(self.run_cmd("streaming", "--no-dns", "--json").stdout)
@@ -122,18 +125,18 @@ class Functional(unittest.TestCase):
     def test_auto_default_ranks_findings(self):
         p = self.run_tool("--no-dns", "--net", "192.168.0.0/16")  # flowspot FILE --no-dns ...
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("ulozto.cz/live", p.stdout)
+        self.assertIn(PREFIX_SERVICE, p.stdout)
         self.assertIn("TeamViewer", p.stdout)
         self.assertIn("IP cameras in 192.168.0.0/16", p.stdout)
         self.assertIn("192.168.1.50", p.stdout)
-        self.assertLess(p.stdout.index("ulozto.cz/live"), p.stdout.index("ssh -X"))  # ranked
+        self.assertLess(p.stdout.index(PREFIX_SERVICE), p.stdout.index("ssh -X"))  # ranked
 
     def test_auto_json(self):
         p = self.run_tool("--no-dns", "--json")
         data = json.loads(p.stdout)
         verdict = data["extra"]["verdict"]
         self.assertTrue(verdict)
-        self.assertEqual(verdict[0]["service"], "ulozto.cz/live")
+        self.assertEqual(verdict[0]["service"], PREFIX_SERVICE)
         scores = [v["score"] for v in verdict]
         self.assertEqual(scores, sorted(scores, reverse=True))
         self.assertTrue(all(0 <= s <= 1 for s in scores))
@@ -148,18 +151,18 @@ class Functional(unittest.TestCase):
         shutil.copy(self.capture, d / "2026" / "11" / "nfcapd.202601010005")
         p = self.run_cmd("streaming", "--no-dns", "--json", capture=d)
         self.assertEqual(p.returncode, 0, p.stderr)
-        ulozto = next(x for x in json.loads(p.stdout)["detections"] if x["service"] == "ulozto.cz/live")
-        self.assertEqual(len(ulozto["flows"]), 6)  # 3 flows in each of the two files
+        hit = next(x for x in json.loads(p.stdout)["detections"] if x["service"] == PREFIX_SERVICE)
+        self.assertEqual(len(hit["flows"]), 6)  # 3 flows in each of the two files
 
     def test_limit_with_real_nfdump(self):
         p = self.run_cmd("streaming", "--no-dns", "--limit", "2", "--json")
-        ulozto = next(x for x in json.loads(p.stdout)["detections"] if x["service"] == "ulozto.cz/live")
-        self.assertEqual((len(ulozto["flows"]), ulozto["truncated"]), (2, True))
+        hit = next(x for x in json.loads(p.stdout)["detections"] if x["service"] == PREFIX_SERVICE)
+        self.assertEqual((len(hit["flows"]), hit["truncated"]), (2, True))
         p = self.run_cmd("streaming", "--no-dns", "--limit", "3", "--json")
-        ulozto = next(x for x in json.loads(p.stdout)["detections"] if x["service"] == "ulozto.cz/live")
-        self.assertEqual((len(ulozto["flows"]), ulozto["truncated"]), (3, False))
+        hit = next(x for x in json.loads(p.stdout)["detections"] if x["service"] == PREFIX_SERVICE)
+        self.assertEqual((len(hit["flows"]), hit["truncated"]), (3, False))
         text = self.run_cmd("streaming", "--no-dns", "--limit", "2").stdout
-        self.assertIn("ulozto.cz/live - 2+ flow(s)", text)
+        self.assertIn(f"{PREFIX_SERVICE} - 2+ flow(s)", text)
 
     def test_dns_cache_pins_answers_end_to_end(self):
         cache = Path(self.tmp.name) / "dns.json"

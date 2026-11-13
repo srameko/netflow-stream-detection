@@ -43,8 +43,8 @@ the Ubuntu nfdump version as *expected*, not *verified*.
 
 Behaviour of nfdump 1.7.10 that the code accounts for (found by testing against the real binary):
 
-* with `-N`, protocols and TCP flags are printed as **numbers** → decoded to `TCP`/`UDP` and `.AP...`
-  (a name/letters form is passed through unchanged, so older output is also accepted);
+* with `-N`, protocols and TCP flags are printed as **numbers** by the Homebrew build but as **letters** by the
+  Ubuntu build → both are normalised to `TCP`/`UDP` and the 8-letter flag form `...AP...` (found by CI on Ubuntu);
 * `No matching flows` is printed on **stdout** even with `-q`;
 * an unreadable or corrupt file makes nfdump print a diagnostic on stderr but **exit 0** → reported as an error,
   not as "nothing found".

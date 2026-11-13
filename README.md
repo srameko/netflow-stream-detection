@@ -10,7 +10,7 @@ to the flow records, and reports the matching flows.
 ```console
 $ flowspot streaming flows.nfcapd
 ulozto.cz/live - 2 flow(s)
-  2013-05-16 10:00:00.000  TCP   93.99.92.7:80 -> 10.0.0.2:50000  flags=.AP... packets=5000 bytes=7000000
+  2013-05-16 10:00:00.000  TCP   93.99.92.7:80 -> 10.0.0.2:50000  flags=...AP... packets=5000 bytes=7000000
 ...
 ```
 
@@ -60,7 +60,7 @@ Common options (after the command): `-j/--json`, `-v/--verbose` (print the nfdum
 | Command | What it finds |
 |---|---|
 | `auto` *(default)* | runs all of the below and ranks the findings by confidence (see next section) |
-| `streaming` | abradio, grooveshark, iprima, koukni, nacevi/visual (iVysílání, Voyo, TopFun, …), mixer, play.cz, stream.cz, ulož.to/live, YouTube (live/html5/https/http), zkouknito; optional generic heuristic (`--generic`) |
+| `streaming` | abradio, grooveshark, iprima, koukni, nacevi/visual (Czech Television's ivysilani.cz, voyo.cz, topfun.cz, ...), mixer, play.cz, stream.cz, ulozto.cz/live, YouTube (live/html5/https/http), zkouknito; optional generic heuristic (`--generic`) |
 | `remote` | `ssh -X` (X11 forwarding), VNC, TeamViewer; experimental Skype (`--skype`) |
 | `ipcam` | likely IP cameras inside a subnet, from traffic profile (top hosts/ports by volume *and* bytes/packet, minus bulk-data ports) |
 | `signatures` | prints every nfdump filter the tool uses – nothing is hidden |
@@ -111,7 +111,7 @@ Handy in scripts: `flowspot remote today.nfcapd && notify-send "remote access se
   "detections": [
     {"service": "VNC", "variant": "", "filter": "port 5900 AND ...",
      "flows": [{"start": "...", "proto": "TCP", "src": "10.0.0.5", "sport": 40000,
-                "dst": "10.0.0.9", "dport": 5900, "flags": ".AP...", "packets": 500, "bytes": 50000, "end": "..."}]}
+                "dst": "10.0.0.9", "dport": 5900, "flags": "...AP...", "packets": 500, "bytes": 50000, "end": "..."}]}
   ],
   "notes": [],
   "extra": {},

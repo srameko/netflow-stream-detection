@@ -41,7 +41,7 @@ class V5Flow(NamedTuple):
 
 def flows() -> List[V5Flow]:
     f: List[V5Flow] = []
-    # ulozto.cz/live: server 93.99.92.0/24, 200 pps, 1500 bytes/packet
+    # ulozto.cz/live (a Czech streaming service): server 93.99.92.0/24, 200 pps, 1500 bytes/packet
     for i in range(1, 4):
         f.append(V5Flow(f"93.99.92.{i}", 80, "10.0.0.2", 50000 + i, TCP, 5000, 7_500_000, 25_000))
     # VNC
