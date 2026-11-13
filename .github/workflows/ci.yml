@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Deny everything by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python }}, real nfdump)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install nfdump (needed by the functional tests)
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y nfdump
+          nfdump -V
+
+      - name: Syntax check
+        run: python -m py_compile flowspot.py
+
+      - name: Unit + functional tests
+        run: python -m unittest discover -s tests -v
+
+      - name: The functional tests must really have run
+        # They self-skip without nfdump; fail the job if that happened.
+        run: |
+          python -m unittest tests.test_functional -v 2>&1 | tee /tmp/functional.log
+          ! grep -q "skipped" /tmp/functional.log
+
+      - name: Smoke test the CLI
+        run: |
+          python flowspot.py --version
+          python flowspot.py --help > /dev/null
+          python flowspot.py signatures > /dev/null
+
+  workflow-lint:
+    name: zizmor (workflow security lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Run zizmor
+        run: |
+          python -m pip install --disable-pip-version-check zizmor
+          zizmor --pedantic .github/workflows/
